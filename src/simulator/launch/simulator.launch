@@ -1,0 +1,5 @@
+<launch>
+    <node name="simulator" pkg="simulator" type="run_simulation.py" output="screen" cwd="node">
+        <rosparam command="load" file="$(find simulator)/launch/simulator_params.yaml" />
+    </node>
+</launch>
