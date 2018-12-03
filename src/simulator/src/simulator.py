@@ -1,7 +1,6 @@
 #!/usr/bin/python
 
 from helper_classes.simulator_config import SimulatorConfig
-from traffic_generation_functions import *
 from simulator_helper_functions import *
 
 from simulator_msgs.msg import Vehicle
@@ -87,8 +86,6 @@ class Simulator:
 
         ros_traffic = msg.traffic
 
-        # print "received"
-
         veh_id = 0
         for vehicle in ros_traffic:
 
@@ -139,13 +136,7 @@ class Simulator:
         self.screen.blit(self.bg_image, (0, 0))
 
         self.displayEgoVehicle()
-
         self.displayTrafficVehicles()
-
         self.displayInformationText()
 
         pygame.display.update()
-
-        if self.ego_veh.pose.x * self.sim_config.pixels_per_meter > 1280:
-            pygame.quit()
-            rospy.signal_shutdown("Car went out of bounds")
