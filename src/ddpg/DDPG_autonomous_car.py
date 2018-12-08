@@ -7,25 +7,28 @@ import shutil
 import time
 import rospy
 import sys
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from autonomous_car import Car
 
+np.random.seed(1995)
+tf.set_random_seed(1995)
 
-np.random.seed(int(time.time()))
-tf.set_random_seed(int(time.time()))
-
-MAX_EPISODES = 10000
-MAX_EP_STEPS = 10000
+MAX_EPISODES = 50000
+MAX_EP_STEPS = 250
 LR_A = 1e-4  # learning rate for actor
-LR_C = 1e-4  # learning rate for critic
-GAMMA = 0.9  # reward discount
-REPLACE_ITER_A = 1100
-REPLACE_ITER_C = 1000
-MEMORY_CAPACITY = 5000
-BATCH_SIZE = 16
-VAR_MIN = 0.2
-RENDER = True
+LR_C = 1e-3  # learning rate for critic
+GAMMA = 0.99  # reward discount
+REPLACE_ITER_A = 2000
+REPLACE_ITER_C = 2000
+MEMORY_CAPACITY = 1000000
+LEARNING_START_RATIO = float(1)/4
+BATCH_SIZE = 64
+VAR_MIN = 0.01
+RENDER = False
 LOAD = False
+TAU = 0.001
 # MODE = ['easy', 'hard']
 # n_model = 1
 
@@ -66,14 +69,11 @@ class Actor(object):
         with tf.variable_scope(scope):
             init_w = tf.contrib.layers.xavier_initializer()
             init_b = tf.constant_initializer(0.001)
-            net = tf.layers.dense(s, 200, activation=tf.nn.relu6,
+            net = tf.layers.dense(s, 400, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l1',
                                   trainable=trainable)
-            net = tf.layers.dense(net, 200, activation=tf.nn.relu6,
+            net = tf.layers.dense(net, 300, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l2',
-                                  trainable=trainable)
-            net = tf.layers.dense(net, 10, activation=tf.nn.relu,
-                                  kernel_initializer=init_w, bias_initializer=init_b, name='l3',
                                   trainable=trainable)
             with tf.variable_scope('a'):
                 actions = tf.layers.dense(net, self.a_dim, activation=tf.nn.tanh, kernel_initializer=init_w,
@@ -93,10 +93,10 @@ class Actor(object):
 
     def add_grad_to_graph(self, a_grads):
         with tf.variable_scope('policy_grads'):
-            self.policy_grads = tf.gradients(ys=self.a, xs=self.e_params, grad_ys=a_grads)
+            self.policy_grads = tf.gradients(ys=self.a, xs=self.e_params, grad_ys= -a_grads) 
 
         with tf.variable_scope('A_train'):
-            opt = tf.train.RMSPropOptimizer(-self.lr)  # (- learning rate) for ascent policy
+            opt = tf.train.AdamOptimizer(learning_rate=self.lr) # negative gradient for ascent policy
             self.train_op = opt.apply_gradients(zip(self.policy_grads, self.e_params))
 
 
@@ -128,7 +128,7 @@ class Critic(object):
             self.loss = tf.reduce_mean(tf.squared_difference(self.target_q, self.q))
 
         with tf.variable_scope('C_train'):
-            self.train_op = tf.train.RMSPropOptimizer(self.lr).minimize(self.loss)
+            self.train_op = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
 
         with tf.variable_scope('a_grad'):
             self.a_grads = tf.gradients(self.q, a)[0]   # tensor of gradients of each sample (None, a_dim)
@@ -136,18 +136,18 @@ class Critic(object):
     def _build_net(self, s, a, scope, trainable):
         with tf.variable_scope(scope):
             init_w = tf.contrib.layers.xavier_initializer()
-            init_b = tf.constant_initializer(0.01)
+            init_b = tf.constant_initializer(0.001)
 
             with tf.variable_scope('l1'):
-                n_l1 = 200
+                n_l1 = 100
                 w1_s = tf.get_variable('w1_s', [self.s_dim, n_l1], initializer=init_w, trainable=trainable)
                 w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], initializer=init_w, trainable=trainable)
                 b1 = tf.get_variable('b1', [1, n_l1], initializer=init_b, trainable=trainable)
                 net = tf.nn.relu6(tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1)
-            net = tf.layers.dense(net, 200, activation=tf.nn.relu6,
+            net = tf.layers.dense(net, 400, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l2',
                                   trainable=trainable)
-            net = tf.layers.dense(net, 10, activation=tf.nn.relu,
+            net = tf.layers.dense(net, 300, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l3',
                                   trainable=trainable)
             with tf.variable_scope('q'):
@@ -174,7 +174,7 @@ class Memory(object):
         self.pointer += 1
 
     def sample(self, n):
-        assert self.pointer >= self.capacity, 'Memory has not been fulfilled'
+        assert self.pointer >= (self.capacity), 'Memory has not been fulfilled' #* LEARNING_START_RATIO
         indices = np.random.choice(self.capacity, size=n)
         return self.data[indices, :]
 
@@ -196,11 +196,36 @@ if LOAD:
 else:
     sess.run(tf.global_variables_initializer())
 
+reward_hist = []
+avg_reward_hist = []
 
+
+def displayRewardHist():
+
+    plt.figure(1)
+    sns.set(style="darkgrid")
+    plt.plot(reward_hist, label='Reward History')
+    plt.xlabel('Episode')
+    plt.ylabel('Epsode Reward')
+    plt.legend(loc='best')
+
+    plt.figure(2)
+    sns.set(style="darkgrid")
+    plt.plot(avg_reward_hist, label='Average Reward trend')
+    plt.xlabel('Episode')
+    plt.ylabel('Average Reward')
+    plt.legend(loc='best')
+
+    plt.show()
+
+
+avg_reward = 0
 def train():
-    var = 3.  # control exploration
+    global avg_reward, reward_hist, avg_reward_hist
 
-    ep = 0
+    var = 1.00  # control exploration
+
+    ep = 1
     while ep < MAX_EPISODES and not rospy.is_shutdown():
         s = env.reset()
         ep_reward = 0
@@ -212,10 +237,10 @@ def train():
                 # Added exploration noise
                 a = actor.choose_action(s)
                 a = np.clip(np.random.normal(a, var), *ACTION_BOUND)    # add randomness to action selection for exploration
-                s_, r, done, reason = env.step(s,a)
+                s_, r, done, reason = env.step(s,a,t)
                 M.store_transition(s, a, r, s_)
 
-                if M.pointer > MEMORY_CAPACITY:
+                if M.pointer > (MEMORY_CAPACITY):  #* LEARNING_START_RATIO
                     var = max([var*.999999, VAR_MIN])    # decay the action randomness
                     b_M = M.sample(BATCH_SIZE)
                     b_s = b_M[:, :STATE_DIM]
@@ -238,9 +263,16 @@ def train():
                           '| Explore: %.2f' % var,
                           '| Pos X: %.2f' % s[0],
                           '| Pos Y: %.2f' % s[1],
+                          '| Count: %d' % Car.counter,
                           '| Step: %d' % t,
                           '| Reason:', reason
                           )
+
+                    reward_hist.append(ep_reward)
+                
+                    avg_reward = float(avg_reward*(ep-1) + ep_reward)/ep
+                    avg_reward_hist.append(avg_reward)
+
                     break
 
                 t += 1
@@ -258,6 +290,8 @@ def train():
     ckpt_path = os.path.join(path, 'DDPG.ckpt')
     save_path = saver.save(sess, ckpt_path, write_meta_graph=False)
     print("\nSave Model %s\n" % save_path)
+
+    displayRewardHist()
 
 
 # def eval():
