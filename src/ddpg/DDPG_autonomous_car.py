@@ -4,7 +4,6 @@ import tensorflow as tf
 import numpy as np
 import os
 import shutil
-import time
 import rospy
 import sys
 import seaborn as sns
@@ -12,8 +11,8 @@ import matplotlib.pyplot as plt
 
 from autonomous_car import Car
 
-np.random.seed(1995)
-tf.set_random_seed(1995)
+np.random.seed(1)
+tf.set_random_seed(1)
 
 MAX_EPISODES = 50000
 MAX_EP_STEPS = 250
@@ -22,9 +21,9 @@ LR_C = 1e-3  # learning rate for critic
 GAMMA = 0.99  # reward discount
 REPLACE_ITER_A = 2000
 REPLACE_ITER_C = 2000
-MEMORY_CAPACITY = 1000000
+MEMORY_CAPACITY = 50000
 LEARNING_START_RATIO = float(1)/4
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 VAR_MIN = 0.01
 RENDER = False
 LOAD = False
@@ -41,91 +40,100 @@ ACTION_BOUND = env.action_bound
 with tf.name_scope('S'):
     S = tf.placeholder(tf.float32, shape=[None, STATE_DIM], name='s')
 with tf.name_scope('R'):
-    R = tf.placeholder(tf.float32, [None, 1], name='r')
+    R = tf.placeholder(tf.float32, shape=[None, 1], name='r')
 with tf.name_scope('S_'):
     S_ = tf.placeholder(tf.float32, shape=[None, STATE_DIM], name='s_')
 
 
 class Actor(object):
-    def __init__(self, sess, action_dim, action_bound, learning_rate, t_replace_iter):
+    def __init__(self, sess, action_dim, action_bound, learning_rate, s, s_):
         self.sess = sess
         self.a_dim = action_dim
         self.action_bound = action_bound
         self.lr = learning_rate
-        self.t_replace_iter = t_replace_iter
-        self.t_replace_counter = 0
+
+        self.s = s
+        self.s_ = s_
 
         with tf.variable_scope('Actor'):
             # input s, output a
-            self.a = self._build_net(S, scope='eval_net', trainable=True)
+            self.a = self._build_net(self.s)
 
-            # input s_, output a, get a_ for critic
-            self.a_ = self._build_net(S_, scope='target_net', trainable=False)
+            self.e_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Actor')
+            ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)
+            self.target_update = ema.apply(self.e_params)
 
-        self.e_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Actor/eval_net')
-        self.t_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Actor/target_net')
+            self.a_ = self._build_net(self.s_, reuse=True, getter=self.get_getter(ema))
 
-    def _build_net(self, s, scope, trainable):
-        with tf.variable_scope(scope):
-            init_w = tf.contrib.layers.xavier_initializer()
+
+    def get_getter(self, ema):
+        def ema_getter(getter, name, *args, **kwargs):
+            var = getter(name, *args, **kwargs)
+            ema_var = ema.average(var)
+            return ema_var if ema_var else var
+
+        return ema_getter
+
+    def _build_net(self, s, reuse=None, getter=None):
+        with tf.variable_scope('Actor', reuse=reuse, custom_getter=getter):
+            init_w = tf.random_normal_initializer(0.0, 0.01)
             init_b = tf.constant_initializer(0.001)
-            net = tf.layers.dense(s, 400, activation=tf.nn.relu,
-                                  kernel_initializer=init_w, bias_initializer=init_b, name='l1',
-                                  trainable=trainable)
-            net = tf.layers.dense(net, 300, activation=tf.nn.relu,
-                                  kernel_initializer=init_w, bias_initializer=init_b, name='l2',
-                                  trainable=trainable)
+            net = tf.layers.dense(s, 300, activation=tf.nn.elu,
+                                  kernel_initializer=init_w, bias_initializer=init_b, name='l1')
+            net = tf.layers.dense(net, 400, activation=tf.nn.elu,
+                                  kernel_initializer=init_w, bias_initializer=init_b, name='l2')
             with tf.variable_scope('a'):
                 actions = tf.layers.dense(net, self.a_dim, activation=tf.nn.tanh, kernel_initializer=init_w,
-                                          name='a', trainable=trainable)
+                                          name='a')
                 scaled_a = tf.multiply(actions, self.action_bound, name='scaled_a')  # Scale output to -action_bound to action_bound
         return scaled_a
 
-    def learn(self, s):   # batch update
-        self.sess.run(self.train_op, feed_dict={S: s})
-        if self.t_replace_counter % self.t_replace_iter == 0:
-            self.sess.run([tf.assign(t, e) for t, e in zip(self.t_params, self.e_params)])
-        self.t_replace_counter += 1
+    def learn(self, s, s_):   # batch update
+        self.sess.run([self.train_op, self.target_update], feed_dict={self.s: s, self.s_:s_})
 
     def choose_action(self, s):
         s = s[np.newaxis, :]    # single state
-        return self.sess.run(self.a, feed_dict={S: s})[0]  # single action
+        return self.sess.run(self.a, feed_dict={self.s: s})[0]  # single action
 
     def add_grad_to_graph(self, a_grads):
         with tf.variable_scope('policy_grads'):
-            self.policy_grads = tf.gradients(ys=self.a, xs=self.e_params, grad_ys= -a_grads) 
+            self.policy_grads = tf.gradients(ys=self.a, xs=self.e_params, grad_ys=-a_grads)
 
         with tf.variable_scope('A_train'):
-            opt = tf.train.AdamOptimizer(learning_rate=self.lr) # negative gradient for ascent policy
+            opt = tf.train.AdamOptimizer(learning_rate = self.lr) # negative gradient for ascent policy
             self.train_op = opt.apply_gradients(zip(self.policy_grads, self.e_params))
 
 
 class Critic(object):
-    def __init__(self, sess, state_dim, action_dim, learning_rate, gamma, t_replace_iter, a, a_):
+    def __init__(self, sess, state_dim, action_dim, learning_rate, gamma, a, a_, s, r, s_):
         self.sess = sess
         self.s_dim = state_dim
         self.a_dim = action_dim
         self.lr = learning_rate
         self.gamma = gamma
-        self.t_replace_iter = t_replace_iter
-        self.t_replace_counter = 0
 
-        with tf.variable_scope('Critic'):
-            # Input (s, a), output q
-            self.a = a
-            self.q = self._build_net(S, self.a, 'eval_net', trainable=True)
+        self.s = s
+        self.r = r
+        self.s_ = s_
 
-            # Input (s_, a_), output q_ for q_target
-            self.q_ = self._build_net(S_, a_, 'target_net', trainable=False)    # target_q is based on a_ from Actor's target_net
+        # Input (s, a), output q
+        self.a = a
+        self.a_ = a_
+        self.q = self._build_net(self.s, self.a)
 
-            self.e_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Critic/eval_net')
-            self.t_params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='Critic/target_net')
+        self.e_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Critic')
+        ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)
+        self.target_update = ema.apply(self.e_params)
+
+        # Input (s_, a_), output q_ for q_target
+        self.q_ = self._build_net(self.s_, self.a_, reuse=True, getter=self.get_getter(ema))
+
 
         with tf.variable_scope('target_q'):
-            self.target_q = R + self.gamma * self.q_
+            self.target_q = self.r + self.gamma * self.q_
 
         with tf.variable_scope('TD_error'):
-            self.loss = tf.reduce_mean(tf.squared_difference(self.target_q, self.q))
+            self.loss = tf.squared_difference(self.target_q, self.q)
 
         with tf.variable_scope('C_train'):
             self.train_op = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
@@ -133,32 +141,35 @@ class Critic(object):
         with tf.variable_scope('a_grad'):
             self.a_grads = tf.gradients(self.q, a)[0]   # tensor of gradients of each sample (None, a_dim)
 
-    def _build_net(self, s, a, scope, trainable):
-        with tf.variable_scope(scope):
-            init_w = tf.contrib.layers.xavier_initializer()
+    def get_getter(self, ema):
+        def ema_getter(getter, name, *args, **kwargs):
+            var = getter(name, *args, **kwargs)
+            ema_var = ema.average(var)
+            return ema_var if ema_var else var
+
+        return ema_getter
+
+    def _build_net(self, s, a, reuse=None, getter=None):
+        with tf.variable_scope('Critic', reuse=reuse, custom_getter=getter):
+            init_w = tf.random_normal_initializer(0.0, 0.01)
             init_b = tf.constant_initializer(0.001)
 
-            with tf.variable_scope('l1'):
-                n_l1 = 100
-                w1_s = tf.get_variable('w1_s', [self.s_dim, n_l1], initializer=init_w, trainable=trainable)
-                w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], initializer=init_w, trainable=trainable)
-                b1 = tf.get_variable('b1', [1, n_l1], initializer=init_b, trainable=trainable)
-                net = tf.nn.relu6(tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1)
-            net = tf.layers.dense(net, 400, activation=tf.nn.relu,
-                                  kernel_initializer=init_w, bias_initializer=init_b, name='l2',
-                                  trainable=trainable)
-            net = tf.layers.dense(net, 300, activation=tf.nn.relu,
-                                  kernel_initializer=init_w, bias_initializer=init_b, name='l3',
-                                  trainable=trainable)
+            n_l1 = 300
+            net = tf.layers.dense(s, n_l1, activation=tf.nn.elu,
+                                  kernel_initializer=init_w, bias_initializer=init_b, name='l1')
+            with tf.variable_scope('l2'):
+                n_l2 = 400
+                w2_s = tf.get_variable('w2_s', [n_l1, n_l2], initializer=init_w)
+                w2_a = tf.get_variable('w2_a', [self.a_dim, n_l2], initializer=init_w)
+                b2 = tf.get_variable('b2', [1, n_l2], initializer=init_b)
+                net = tf.nn.elu(tf.matmul(net, w2_s) + tf.matmul(a, w2_a) + b2)
+
             with tf.variable_scope('q'):
-                q = tf.layers.dense(net, 1, kernel_initializer=init_w, bias_initializer=init_b, trainable=trainable)   # Q(s,a)
+                q = tf.layers.dense(net, 1, kernel_initializer=init_w, bias_initializer=init_b)   # Q(s,a)
         return q
 
     def learn(self, s, a, r, s_):
-        self.sess.run(self.train_op, feed_dict={S: s, self.a: a, R: r, S_: s_})
-        if self.t_replace_counter % self.t_replace_iter == 0:
-            self.sess.run([tf.assign(t, e) for t, e in zip(self.t_params, self.e_params)])
-        self.t_replace_counter += 1
+        self.sess.run([self.train_op, self.target_update], feed_dict={self.s: s, self.a: a, self.r: r, self.s_: s_})
 
 
 class Memory(object):
@@ -182,14 +193,14 @@ class Memory(object):
 sess = tf.Session()
 
 # Create actor and critic.
-actor = Actor(sess, ACTION_DIM, ACTION_BOUND[1], LR_A, REPLACE_ITER_A)
-critic = Critic(sess, STATE_DIM, ACTION_DIM, LR_C, GAMMA, REPLACE_ITER_C, actor.a, actor.a_)
+actor = Actor(sess, ACTION_DIM, ACTION_BOUND[1], LR_A, S, S_)
+critic = Critic(sess, STATE_DIM, ACTION_DIM, LR_C, GAMMA, actor.a, actor.a_, S, R, S_)
 actor.add_grad_to_graph(critic.a_grads)
 
 M = Memory(MEMORY_CAPACITY, dims=2 * STATE_DIM + ACTION_DIM + 1)
 
 saver = tf.train.Saver()
-path = './model'#+MODE[n_model]
+path = './model'
 
 if LOAD:
     saver.restore(sess, tf.train.latest_checkpoint(path))
@@ -204,7 +215,7 @@ def displayRewardHist():
 
     plt.figure(1)
     sns.set(style="darkgrid")
-    plt.plot(reward_hist, label='Reward History')
+    plt.plot(reward_hist, lw=1, label='Reward History')
     plt.xlabel('Episode')
     plt.ylabel('Epsode Reward')
     plt.legend(loc='best')
@@ -223,8 +234,9 @@ avg_reward = 0
 def train():
     global avg_reward, reward_hist, avg_reward_hist
 
-    var = 1.00  # control exploration
+    var = 0.5  # control exploration
 
+    state = "EXPLORING"
     ep = 1
     while ep < MAX_EPISODES and not rospy.is_shutdown():
         s = env.reset()
@@ -237,11 +249,13 @@ def train():
                 # Added exploration noise
                 a = actor.choose_action(s)
                 a = np.clip(np.random.normal(a, var), *ACTION_BOUND)    # add randomness to action selection for exploration
-                s_, r, done, reason = env.step(s,a,t)
+                s_, r, done, reason = env.step(s, a, t)
                 M.store_transition(s, a, r, s_)
 
                 if M.pointer > (MEMORY_CAPACITY):  #* LEARNING_START_RATIO
-                    var = max([var*.999999, VAR_MIN])    # decay the action randomness
+                    state = "LEARNING"
+
+                    var = max([var*.999995, VAR_MIN])    # decay the action randomness
                     b_M = M.sample(BATCH_SIZE)
                     b_s = b_M[:, :STATE_DIM]
                     b_a = b_M[:, STATE_DIM: STATE_DIM + ACTION_DIM]
@@ -249,7 +263,7 @@ def train():
                     b_s_ = b_M[:, -STATE_DIM:]
 
                     critic.learn(b_s, b_a, b_r, b_s_)
-                    actor.learn(b_s)
+                    actor.learn(b_s, b_s_)
 
                 s = s_
                 ep_reward += r
@@ -258,6 +272,7 @@ def train():
                 # if done:
                     result = '| done' if done else '| ----'
                     print('Ep:', ep,
+                          '|', state,
                           result,
                           '| R: %.2f' % ep_reward,
                           '| Explore: %.2f' % var,
@@ -293,16 +308,16 @@ def train():
 
     displayRewardHist()
 
+def eval():
+    done = False
 
-# def eval():
-#     env.set_fps(30)
-#     s = env.reset()
-#     while True:
-#         if RENDER:
-#             env.render()
-#         a = actor.choose_action(s)
-#         s_, r, done = env.step(a)
-#         s = s_
+    s = env.reset()
+    while True and not rospy.is_shutdown():
+        if done:
+            s = env.reset()
+        a = actor.choose_action(s)
+        s_, r, done, result = env.step(s, a, -1)
+        s = s_
 
 if __name__ == '__main__':
 

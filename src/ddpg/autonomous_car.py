@@ -231,7 +231,7 @@ class Car(object):
         #collision_zone
 
         if np.fabs(distance_x_veh) <= self.vehicle_length and np.fabs(distance_y_veh) <= self.vehicle_width:
-            reward = reward - 750
+            reward = reward - 500
             reason = "COLLIDED MOVING VEHICLE"
             if distance_x_veh < 0:
                 reason = "MOVING VEHICLE COLLIDED EGO VEHICLE"
@@ -239,7 +239,7 @@ class Car(object):
             done = True
 
         if distance_x_obs <= self.vehicle_length and distance_y_obs <= self.vehicle_width:
-            reward = reward - 1500
+            reward = reward - 500
             reason = "COLLIDED STOPPED VEHICLE"
             done = True
         
@@ -252,11 +252,11 @@ class Car(object):
         #stays_on_road
 
         if not (23.00 < ego_ns[1] < 31.32):
-            reward = reward - 1000
+            reward = reward - 500
             reason = "OUT OF THE ROAD"
             done = True
         elif ego_ns[0] > 90:
-            reward = reward + 1000
+            reward = reward + 500
             reason = "ROAD ENDED!"
             done = True
         
@@ -272,9 +272,7 @@ class Car(object):
         #lane_changing
 
         if ego_ns[9] <= self.prev_ego_state[9]:
-            reward = reward + 3
-        else:
-            reward = reward - 6 #is this case of going reverse?
+            reward = reward + 10
 
         if eucl_distance_now != 0:
             reward = reward + 100/eucl_distance_now
