@@ -8,7 +8,7 @@ from simulator_msgs.msg import EgoVehicle, TrafficVehicles, Vehicle
 
 class Car(object):
 
-    action_bound = [-0.13, 0.13]
+    action_bound = [-0.02, 0.02]
     action_dim = 2
     state_dim = 20
     counter = 0
@@ -19,14 +19,14 @@ class Car(object):
 
         self.prev_ego_state = None
 
-        self.goal_state = [88.57, 29.24]
+        self.goal_state = [85.57, 29.24]
         self.vel_max = 38       # 85 mph
         self.vel_min = 17.88    # 30 mph
         self.abs_accel_max = 4
         self.steering_max = 40
         self.lr = 1.4
         self.lf = 1.4
-        self.timestep = 0.033
+        self.timestep = 0.01
         self.vehicle_length = 4.78
         self.vehicle_width = 2.1
         self.wheelbase = 2.8
@@ -73,8 +73,8 @@ class Car(object):
 
             vehicle = Vehicle()
 
-            vehicle.pose.x = state[0] #+ ego_state[0]
-            vehicle.pose.y = state[1]# + ego_state[1]
+            vehicle.pose.x = state[0]
+            vehicle.pose.y = state[1]
             vehicle.pose.theta = state[4]
 
             vehicle.vel = state[2]
@@ -92,7 +92,7 @@ class Car(object):
 
         # now = rospy.get_time()
         # self.timestep = now - self.prev_step_time
-        # self.prev_step_time = now        
+        # self.prev_step_time = now
 
         state = state.reshape((2,10))
 
@@ -225,57 +225,58 @@ class Car(object):
 
         eucl_distance_now = np.sqrt(distance_x_goal**2 + distance_y_goal**2)
 
-        if distance_left_road <1.25 or distance_right_road <1.25:
-            reward = reward - 50
+        # if distance_left_road < 0.75:
+        #     reward = reward - 3
+        #
+        # if distance_right_road < 1.5:
+        #     reward = reward - 3
 
         #collision_zone
 
         if np.fabs(distance_x_veh) <= self.vehicle_length and np.fabs(distance_y_veh) <= self.vehicle_width:
-            reward = reward - 500
+            reward = reward - 50
             reason = "COLLIDED MOVING VEHICLE"
             if distance_x_veh < 0:
                 reason = "MOVING VEHICLE COLLIDED EGO VEHICLE"
 
             done = True
 
+        # if distance_x_obs <= 15.0 and distance_y_obs <= 1.5:
+        #     reward = reward - 15
+        #
+        # if np.fabs(distance_x_veh) <= self.vehicle_length and distance_y_obs <= self.vehicle_width:
+        #     reward = reward - 20
+        #
+        # if math.fabs( math.degrees(ego_ns[4]) ) > 13:
+        #     reward = reward - 5
+
         if distance_x_obs <= self.vehicle_length and distance_y_obs <= self.vehicle_width:
-            reward = reward - 500
+            reward = reward - 50
             reason = "COLLIDED STOPPED VEHICLE"
             done = True
-        
-        #safe_zone_cost
-
-        # if distance_x_veh <= self.vehicle_length + 1.5 and distance_y_veh < self.vehicle_width + 0.5:
-        #     reward = reward-0.5
-        #     #print("CLOSE TO VEHICLE"),
 
         #stays_on_road
 
         if not (23.00 < ego_ns[1] < 31.32):
-            reward = reward - 500
+            reward = reward - 50
             reason = "OUT OF THE ROAD"
             done = True
         elif ego_ns[0] > 90:
-            reward = reward + 500
+            reward = reward + 50
             reason = "ROAD ENDED!"
             done = True
         
         #goal-reaching 
 
         if ego_ns[0] > 85 and ego_ns[1] > 27:                                #distance_x_goal < 1 and distance_y_goal < 1.0:
-            reward = reward + 2000
+            reward = reward + 100
             reason = "GOALLLLLLLLLLLLLLLLLLLLLLLLLLL REACHED"
             Car.counter = Car.counter + 1
             # print ("counter",Car.counter)
             done  = True
 
-        #lane_changing
-
-        if ego_ns[9] <= self.prev_ego_state[9]:
-            reward = reward + 10
-
         if eucl_distance_now != 0:
-            reward = reward + 100/eucl_distance_now
+            reward = reward + 50/eucl_distance_now
 
         self.prev_ego_state = ego_ns
 
@@ -292,7 +293,7 @@ class Car(object):
 
         traffic_init = [3.163, 29.312]
 
-        others_state = np.array([traffic_init[0] - ego_vehicle[0], traffic_init[1] - ego_vehicle[1], 29.05, 0, 0, 61.718 - ego_vehicle[0], 25.024 - ego_vehicle[1], 0, 0, 0])
+        others_state = np.array([traffic_init[0] - ego_vehicle[0], traffic_init[1] - ego_vehicle[1], 29.05, 0, 0, 70.718 - ego_vehicle[0], 24.524 - ego_vehicle[1], 0, 0, 0])
 
         # obstacle = np.array([61.718, 25.024, 0, 0, 0, 0, 0, 0, 0, 0])
 

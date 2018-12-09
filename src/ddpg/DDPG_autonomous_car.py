@@ -4,27 +4,26 @@ import tensorflow as tf
 import numpy as np
 import os
 import shutil
+import pygame
 import rospy
 import sys
 import seaborn as sns
 import matplotlib.pyplot as plt
 
 from autonomous_car import Car
+from OU_Noise import OUNoise
 
 np.random.seed(1)
 tf.set_random_seed(1)
 
-MAX_EPISODES = 50000
-MAX_EP_STEPS = 250
+NOISY_EPISODES = 2000
+MAX_EPISODES = 2000
+MAX_EP_STEPS = 10000
 LR_A = 1e-4  # learning rate for actor
 LR_C = 1e-3  # learning rate for critic
-GAMMA = 0.99  # reward discount
-REPLACE_ITER_A = 2000
-REPLACE_ITER_C = 2000
-MEMORY_CAPACITY = 50000
-LEARNING_START_RATIO = float(1)/4
-BATCH_SIZE = 32
-VAR_MIN = 0.01
+GAMMA = 0.9  # reward discount
+MEMORY_CAPACITY = 5000
+BATCH_SIZE = 64
 RENDER = False
 LOAD = False
 TAU = 0.001
@@ -59,7 +58,7 @@ class Actor(object):
             # input s, output a
             self.a = self._build_net(self.s)
 
-            self.e_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Actor')
+            self.e_params = tf.trainable_variables()
             ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)
             self.target_update = ema.apply(self.e_params)
 
@@ -76,11 +75,11 @@ class Actor(object):
 
     def _build_net(self, s, reuse=None, getter=None):
         with tf.variable_scope('Actor', reuse=reuse, custom_getter=getter):
-            init_w = tf.random_normal_initializer(0.0, 0.01)
+            init_w = tf.random_normal_initializer(0.0, 0.03)
             init_b = tf.constant_initializer(0.001)
-            net = tf.layers.dense(s, 300, activation=tf.nn.elu,
+            net = tf.layers.dense(s, 400, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l1')
-            net = tf.layers.dense(net, 400, activation=tf.nn.elu,
+            net = tf.layers.dense(net, 300, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l2')
             with tf.variable_scope('a'):
                 actions = tf.layers.dense(net, self.a_dim, activation=tf.nn.tanh, kernel_initializer=init_w,
@@ -97,10 +96,10 @@ class Actor(object):
 
     def add_grad_to_graph(self, a_grads):
         with tf.variable_scope('policy_grads'):
-            self.policy_grads = tf.gradients(ys=self.a, xs=self.e_params, grad_ys=-a_grads)
+            self.policy_grads = tf.gradients(ys=self.a, xs=self.e_params, grad_ys=a_grads)
 
         with tf.variable_scope('A_train'):
-            opt = tf.train.AdamOptimizer(learning_rate = self.lr) # negative gradient for ascent policy
+            opt = tf.train.AdamOptimizer(learning_rate = -self.lr) # negative gradient for ascent policy
             self.train_op = opt.apply_gradients(zip(self.policy_grads, self.e_params))
 
 
@@ -121,7 +120,7 @@ class Critic(object):
         self.a_ = a_
         self.q = self._build_net(self.s, self.a)
 
-        self.e_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Critic')
+        self.e_params = tf.trainable_variables()
         ema = tf.train.ExponentialMovingAverage(decay=1 - TAU)
         self.target_update = ema.apply(self.e_params)
 
@@ -139,7 +138,7 @@ class Critic(object):
             self.train_op = tf.train.AdamOptimizer(learning_rate=self.lr).minimize(self.loss)
 
         with tf.variable_scope('a_grad'):
-            self.a_grads = tf.gradients(self.q, a)[0]   # tensor of gradients of each sample (None, a_dim)
+            self.a_grads = tf.gradients(self.q, self.a)[0]   # tensor of gradients of each sample (None, a_dim)
 
     def get_getter(self, ema):
         def ema_getter(getter, name, *args, **kwargs):
@@ -151,18 +150,18 @@ class Critic(object):
 
     def _build_net(self, s, a, reuse=None, getter=None):
         with tf.variable_scope('Critic', reuse=reuse, custom_getter=getter):
-            init_w = tf.random_normal_initializer(0.0, 0.01)
+            init_w = tf.random_normal_initializer(0.0, 0.03)
             init_b = tf.constant_initializer(0.001)
 
-            n_l1 = 300
-            net = tf.layers.dense(s, n_l1, activation=tf.nn.elu,
+            n_l1 = 400
+            net = tf.layers.dense(s, n_l1, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b, name='l1')
             with tf.variable_scope('l2'):
-                n_l2 = 400
+                n_l2 = 300
                 w2_s = tf.get_variable('w2_s', [n_l1, n_l2], initializer=init_w)
                 w2_a = tf.get_variable('w2_a', [self.a_dim, n_l2], initializer=init_w)
                 b2 = tf.get_variable('b2', [1, n_l2], initializer=init_b)
-                net = tf.nn.elu(tf.matmul(net, w2_s) + tf.matmul(a, w2_a) + b2)
+                net = tf.nn.relu(tf.matmul(net, w2_s) + tf.matmul(a, w2_a) + b2)
 
             with tf.variable_scope('q'):
                 q = tf.layers.dense(net, 1, kernel_initializer=init_w, bias_initializer=init_b)   # Q(s,a)
@@ -199,8 +198,10 @@ actor.add_grad_to_graph(critic.a_grads)
 
 M = Memory(MEMORY_CAPACITY, dims=2 * STATE_DIM + ACTION_DIM + 1)
 
+exploration_noise = OUNoise(ACTION_DIM)
+
 saver = tf.train.Saver()
-path = './model'
+path = './model/'
 
 if LOAD:
     saver.restore(sess, tf.train.latest_checkpoint(path))
@@ -230,11 +231,46 @@ def displayRewardHist():
     plt.show()
 
 
+accel, steer = 0.0, 0.0
+human_input = False
+def addHumanSupervision(action):
+
+    global accel, steer, human_input
+
+    for event in pygame.event.get():
+
+        if event.type == pygame.KEYDOWN:
+            human_input = True
+
+            if event.key == pygame.K_UP:
+                accel = ACTION_BOUND[1]
+            elif event.key == pygame.K_DOWN:
+                accel = ACTION_BOUND[0]
+            elif event.key == pygame.K_LEFT:
+                steer = ACTION_BOUND[1]
+            elif event.key == pygame.K_RIGHT:
+                steer = ACTION_BOUND[0]
+
+        if event.type == pygame.KEYUP:
+            human_input = False
+
+            if event.key == pygame.K_UP or event.key == pygame.K_DOWN:
+                accel = 0.0
+            elif event.key == pygame.K_LEFT or event.key == pygame.K_RIGHT:
+                steer = 0.0
+
+        pygame.display.update()
+
+    if human_input:
+        action[0] = steer
+        action[1] = accel
+
+    pygame.display.update()
+
 avg_reward = 0
 def train():
     global avg_reward, reward_hist, avg_reward_hist
-
-    var = 0.5  # control exploration
+    global steer, accel
 
     state = "EXPLORING"
     ep = 1
@@ -248,14 +284,17 @@ def train():
             try:
                 # Added exploration noise
                 a = actor.choose_action(s)
-                a = np.clip(np.random.normal(a, var), *ACTION_BOUND)    # add randomness to action selection for exploration
+                if ep < NOISY_EPISODES and ep % 10 != 0:
+                    a = np.clip(a+exploration_noise.noise(), *ACTION_BOUND) # add noise to action for exploration
+
+                addHumanSupervision(a)
+
                 s_, r, done, reason = env.step(s, a, t)
                 M.store_transition(s, a, r, s_)
 
                 if M.pointer > (MEMORY_CAPACITY):  #* LEARNING_START_RATIO
                     state = "LEARNING"
 
-                    var = max([var*.999995, VAR_MIN])    # decay the action randomness
                     b_M = M.sample(BATCH_SIZE)
                     b_s = b_M[:, :STATE_DIM]
                     b_a = b_M[:, STATE_DIM: STATE_DIM + ACTION_DIM]
@@ -263,19 +302,17 @@ def train():
                     b_s_ = b_M[:, -STATE_DIM:]
 
                     critic.learn(b_s, b_a, b_r, b_s_)
-                    actor.learn(b_s, b_s_)
+                    actor.learn(b_s, b_s_)#, critic.a_grads)
 
                 s = s_
                 ep_reward += r
 
                 if t == MAX_EP_STEPS-1 or done:
-                # if done:
                     result = '| done' if done else '| ----'
                     print('Ep:', ep,
                           '|', state,
                           result,
                           '| R: %.2f' % ep_reward,
-                          '| Explore: %.2f' % var,
                           '| Pos X: %.2f' % s[0],
                           '| Pos Y: %.2f' % s[1],
                           '| Count: %d' % Car.counter,
@@ -302,8 +339,8 @@ def train():
 
     if os.path.isdir(path): shutil.rmtree(path)
     os.mkdir(path)
-    ckpt_path = os.path.join(path, 'DDPG.ckpt')
-    save_path = saver.save(sess, ckpt_path, write_meta_graph=False)
+    ckpt_path = os.path.join(path, 'DDPG')
+    save_path = saver.save(sess, ckpt_path)
     print("\nSave Model %s\n" % save_path)
 
     displayRewardHist()
@@ -320,6 +357,9 @@ def eval():
         s = s_
 
 if __name__ == '__main__':
+
+    pygame.init()
+    screen = pygame.display.set_mode((1,1))
 
     env.initializeTimings()
 
